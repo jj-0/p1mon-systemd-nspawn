@@ -1,0 +1,78 @@
+Er wordt hier en daar in de comments gevraagt of je p1mon kan installeren op een al bestaande Pi of in een docker image. Daarmee kan je dan de Pi ook nog voor andere zaken gebruiken. Dit is te realiseren door gebruik te maken van een 'systemd-nspawn light-weight namespace container'. Hiermee draait de p1mon software eenvoudig als aparte virtual machine op je Pi. Als extra bonus is dit ook te gebruiken op andere hardware dan de Pi, ik heb het hiermee ook draaiend op de Pi 3B (Raspbian Buster), Pi 4B (Raspbian Buster), OlinuXino Lime (Armbian Buster, Allwinner A20 armv7l CPU), Odroid C2 (Ubuntu 18.04.2 LTS, S905 Armv8 CPU) en ook op een UP2 (Ubuntu 18.10, Intel X86_64 CPU).
+
+De p1mon web interface is dan te bereiken op de hostname en/of IP-adres (poort 80) van de hostmachine.
+
+Voorzover ik heb kunnen zien werkt dit goed, met uizondering van:
+- Gebruik van een backup USB-drive voor migratie. Deze wordt niet door de p1mon container gemount.
+- Herstarten van p1mon via de webinterface. Herstarten word niet ondersteund door systemd-nspawn
+- Ssh-en naar de p1mon container. Je ssh't in principe naar de host.
+- Op de X86_64 CPU lijkt de nginx webserver af en toe te hangen. Ik heb hier een cronjob aan toegevoegd die hem om middernacht opnieuw opstart.
+- Op de X86_64 CPU lukt werkt het minuten overzicht van het stroomverbruik soms niet en soms wel. Geen idee waarom. 
+- Na restoren van backups tussen verschillende CPU's klopt de api key van openweathermap niet meer. Dit komt denk ik omdat de CPU modelnaam (/proc/device-tree/model) verschilt tussen de CPU's en deze wordt gebruikt voor decryptie van de api key. Als je de api key weer oopnieuw instelt werkt het weer.
+
+Je installeert/configureert dit als volgt:
+
+1. Log in als user op het apparaat waar je dit wil installeren. In het voorbeeld gebruik ik een Pi.
+
+2. Download de p1mon image (op dit moment p1mon201907-00.911-8.zip) en zet de uitgepakte image in bijvoorbeeld /home/pi/Downloads. Dan heb je dus een /home/pi/Downloads/p1mon201907-00.911-8.img
+
+3. Wordt root:
+sudo su
+
+4. Installeer sytemd-nspawn:
+apt install systemd-container
+
+5. Maak wat benodigde directories aan:
+mkdir -p /var/lib/machines/p1mon
+mkdir -p /etc/systemd/nspawn
+mkdir -p /etc/systemd/system/systemd-nspawn\@p1mon.service.d
+
+6. Maak de benodigde configuratiebestanden aan:
+cat >/etc/systemd/nspawn/p1mon.nspawn <<EOF
+[Network]
+# p1mon deelt de netwerk interfaces met de host
+Private=no
+VirtualEthernet=no
+
+[Exec]
+PrivateUsers=no
+
+[Files]
+# Zorg ervoor dat /proc/device-thread/model bestaat
+# Hoeft niet op een Pi, maar wel op bijvoorbeeld de OlinuXino Lime en Odroid C2
+Bind=/sys/firmware
+# Link naar de 'echte' ttyUSB0 poort van de host
+Bind=/dev/ttyUSB0
+EOF
+
+cat >/etc/systemd/system/systemd-nspawn\@p1mon.service.d/override.conf <<EOF
+[Service]
+# Toegang tot de host ttyUSB0 poort
+DeviceAllow=char-ttyUSB rwm
+EOF
+
+7. Mount de root partitie van p1mon201907-00.911-8.img en kopieer de bestanden naar de p1mon container directory:
+losetup -fP --show /home/pi/Downloads/p1mon201907-00.911-8.img
+# Aannemend dat de partities op loop0 komen 
+mount /dev/loop0p2 /mnt
+cp -a /mnt/* /var/lib/machines/p1mon
+umount /mnt
+# (even wachten)
+losetup -d loop0
+
+8. Als de host niet een arm CPU heeft installeer dan de qemu 'just in time' emulatie. Dit voert de individuele arm-binaries van p1mon uit maar doet de system calls naar de host kernel.
+apt install qemu-user-static
+
+9. Zorg ervoor dat p1mon automatisch wordt opgestart bij het booten:
+systemctl enable machines.target
+systemctl enable systemd-nspawn@$p1mon
+
+Nu het geinstallerd is kan je de volgend commando's uitvoeren:
+'machinectl start p1mon' -> Start de container
+'machinectl stop p1mon' -> Stopt de container
+'machinectl status p1mon' -> Geeft status, processen en log van de container weer
+'machinectl shell p1mon' -> Geeft een shell in de container
+
+Daarnaast kan je om te testen (als de container niet draait) ook nog uitvoeren:
+'systemd-nspawn --boot -D /var/lib/machines/p1mon' -> Start de container met boot output naar de console en een login prompt.
+'systemd-nspawn -D /var/lib/machines/p1mon' -> Geedt een login in de rootfs omgeving van de container, maar zonder ook te booten. Dan draait p1mon niet maar je kan bijvoorbeeld wel updaten of bestanden editten.
